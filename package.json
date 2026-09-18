@@ -3,12 +3,31 @@
 	"version": "0.1.0",
 	"description": "Web search and URL fetch tools for the pi coding agent.",
 	"type": "module",
-	"keywords": ["pi-package"],
+	"scripts": {
+		"test": "node --import tsx --test tests/**/*.test.ts",
+		"typecheck": "tsc -p tsconfig.json"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"keywords": [
+		"pi-package"
+	],
 	"pi": {
-		"extensions": ["./extensions"]
+		"extensions": [
+			"./extensions"
+		]
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
 		"typebox": "*"
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.1",
+		"tsx": "^4.23.13",
+		"typescript": "^7.0.2"
+	},
+	"dependencies": {
+		"ddg-search": "^2026.2.16"
 	}
 }
