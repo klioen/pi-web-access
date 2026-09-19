@@ -12,18 +12,26 @@ import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { search as duckDuckGoSearch, type SearchResult as DuckDuckGoResult } from "ddg-search";
 import { Type } from "typebox";
+import { searchBrave } from "./search/brave.ts";
+import { searchExa, type ExaTransport } from "./search/exa.ts";
+import { searchSearxng } from "./search/searxng.ts";
+import { searchSerper } from "./search/serper.ts";
+import { searchTavily } from "./search/tavily.ts";
+import { requestSignal, type WebResult } from "./search/types.ts";
 
 const DEFAULT_COUNT = 5;
 const MAX_COUNT = 50;
-const REQUEST_TIMEOUT_MS = 60_000;
 
 const HOST = "mercury.volcengineapi.com";
 const SERVICE = "volc_torchlight_api";
 const VERSION = "2025-01-01";
 const REGION = "cn-beijing";
 
-export type SearchProvider = "duckduckgo" | "volcengine";
+export type SearchProvider = "duckduckgo" | "volcengine" | "searxng" | "brave" | "tavily" | "exa" | "serper";
 type ProviderSetting = "auto" | SearchProvider;
+const SEARCH_PROVIDERS: readonly SearchProvider[] = [
+	"duckduckgo", "volcengine", "searxng", "brave", "tavily", "exa", "serper",
+];
 
 interface Credentials {
 	accessKeyId: string;
@@ -38,15 +46,16 @@ interface SignedProviderResult {
 	Snippet?: string;
 }
 
-export interface WebResult {
-	title: string;
-	url: string;
-	summary: string;
-}
+export type { WebResult } from "./search/types.ts";
 
 interface SearchAdapters {
 	duckduckgo(query: string, count: number, signal?: AbortSignal): Promise<WebResult[]>;
 	volcengine(query: string, count: number, credentials: Credentials, signal?: AbortSignal): Promise<WebResult[]>;
+	searxng?(query: string, count: number, baseUrl: string, signal?: AbortSignal): Promise<WebResult[]>;
+	brave?(query: string, count: number, apiKey: string, signal?: AbortSignal): Promise<WebResult[]>;
+	tavily?(query: string, count: number, apiKey: string, signal?: AbortSignal): Promise<WebResult[]>;
+	exa?(query: string, count: number, apiKey?: string, signal?: AbortSignal): Promise<{ transport: ExaTransport; results: WebResult[] }>;
+	serper?(query: string, count: number, apiKey: string, signal?: AbortSignal): Promise<WebResult[]>;
 }
 
 interface WebSearchDetails {
@@ -54,6 +63,7 @@ interface WebSearchDetails {
 	count?: number;
 	provider?: SearchProvider;
 	resultCount?: number;
+	transport?: ExaTransport;
 	error?: string;
 }
 
@@ -113,9 +123,9 @@ function missingCredentialsError(): Error {
 export function resolveSearchProvider(value: string | undefined, hasCredentials: boolean): SearchProvider {
 	const setting = (value?.trim().toLowerCase() || "auto") as ProviderSetting;
 	if (setting === "auto") return hasCredentials ? "volcengine" : "duckduckgo";
-	if (setting === "duckduckgo" || setting === "volcengine") return setting;
+	if (SEARCH_PROVIDERS.includes(setting as SearchProvider)) return setting as SearchProvider;
 	throw new Error(
-		`Unsupported WEB_SEARCH_PROVIDER: ${value}. Expected auto, duckduckgo, or volcengine.`,
+		`Unsupported WEB_SEARCH_PROVIDER: ${value}. Expected auto, ${SEARCH_PROVIDERS.join(", ")}.`,
 	);
 }
 
@@ -151,11 +161,6 @@ function normQuery(params: Record<string, string>): string {
 
 function xDate(now: Date): string {
 	return now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-}
-
-function requestSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 async function signedProviderSearch(
@@ -239,7 +244,26 @@ async function duckDuckGoProviderSearch(query: string, count: number, signal?: A
 const defaultAdapters: SearchAdapters = {
 	duckduckgo: duckDuckGoProviderSearch,
 	volcengine: signedProviderSearch,
+	searxng: searchSearxng,
+	brave: searchBrave,
+	tavily: searchTavily,
+	exa: searchExa,
+	serper: searchSerper,
 };
+
+function envValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+	return environment[name]?.trim() || undefined;
+}
+
+function requireAdapter<K extends keyof SearchAdapters>(adapters: SearchAdapters, provider: K): NonNullable<SearchAdapters[K]> {
+	const adapter = adapters[provider];
+	if (!adapter) throw new Error(`Search adapter unavailable: ${String(provider)}`);
+	return adapter as NonNullable<SearchAdapters[K]>;
+}
+
+function missingProviderConfig(provider: SearchProvider, setting: string): Error {
+	return new Error(`${provider} search configuration missing. Set ${setting}.`);
+}
 
 export async function runSearch(
 	query: string,
@@ -248,13 +272,40 @@ export async function runSearch(
 	credentials: Credentials | undefined,
 	signal?: AbortSignal,
 	adapters: SearchAdapters = defaultAdapters,
-): Promise<{ provider: SearchProvider; results: WebResult[] }> {
+	environment: NodeJS.ProcessEnv = process.env,
+): Promise<{ provider: SearchProvider; results: WebResult[]; transport?: ExaTransport }> {
 	const provider = resolveSearchProvider(providerSetting, credentials !== undefined);
-	if (provider === "volcengine" && !credentials) throw missingCredentialsError();
-	const results = provider === "duckduckgo"
-		? await adapters.duckduckgo(query, count, signal)
-		: await adapters.volcengine(query, count, credentials as Credentials, signal);
-	return { provider, results };
+	switch (provider) {
+		case "duckduckgo":
+			return { provider, results: await adapters.duckduckgo(query, count, signal) };
+		case "volcengine":
+			if (!credentials) throw missingCredentialsError();
+			return { provider, results: await adapters.volcengine(query, count, credentials, signal) };
+		case "searxng": {
+			const baseUrl = envValue(environment, "SEARXNG_BASE_URL");
+			if (!baseUrl) throw missingProviderConfig(provider, "SEARXNG_BASE_URL");
+			return { provider, results: await requireAdapter(adapters, provider)(query, count, baseUrl, signal) };
+		}
+		case "brave": {
+			const apiKey = envValue(environment, "BRAVE_SEARCH_API_KEY");
+			if (!apiKey) throw missingProviderConfig(provider, "BRAVE_SEARCH_API_KEY");
+			return { provider, results: await requireAdapter(adapters, provider)(query, count, apiKey, signal) };
+		}
+		case "tavily": {
+			const apiKey = envValue(environment, "TAVILY_API_KEY");
+			if (!apiKey) throw missingProviderConfig(provider, "TAVILY_API_KEY");
+			return { provider, results: await requireAdapter(adapters, provider)(query, count, apiKey, signal) };
+		}
+		case "exa": {
+			const response = await requireAdapter(adapters, provider)(query, count, envValue(environment, "EXA_API_KEY"), signal);
+			return { provider, ...response };
+		}
+		case "serper": {
+			const apiKey = envValue(environment, "SERPER_API_KEY");
+			if (!apiKey) throw missingProviderConfig(provider, "SERPER_API_KEY");
+			return { provider, results: await requireAdapter(adapters, provider)(query, count, apiKey, signal) };
+		}
+	}
 }
 
 export function formatResults(results: WebResult[]): string {
@@ -292,7 +343,7 @@ export default function (pi: ExtensionAPI) {
 			const count = Math.max(1, Math.min(Math.floor(params.count ?? DEFAULT_COUNT), MAX_COUNT));
 			try {
 				const credentials = findCredentials();
-				const { provider, results } = await runSearch(
+				const { provider, results, transport } = await runSearch(
 					query,
 					count,
 					process.env.WEB_SEARCH_PROVIDER,
@@ -301,7 +352,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				return {
 					content: [{ type: "text", text: formatResults(results) }],
-					details: { query, count, provider, resultCount: results.length },
+					details: { query, count, provider, ...(transport ? { transport } : {}), resultCount: results.length },
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

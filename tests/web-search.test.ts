@@ -22,9 +22,13 @@ test("auto falls back to DuckDuckGo without credentials", () => {
 });
 
 test("explicit providers are deterministic and unsupported values fail", () => {
-	assert.equal(resolveSearchProvider("duckduckgo", true), "duckduckgo");
-	assert.equal(resolveSearchProvider("volcengine", false), "volcengine");
-	assert.throws(() => resolveSearchProvider("unknown", false), /Expected auto, duckduckgo, or volcengine/);
+	for (const provider of ["duckduckgo", "volcengine", "searxng", "brave", "tavily", "exa", "serper"] as const) {
+		assert.equal(resolveSearchProvider(provider, false), provider);
+	}
+	assert.throws(
+		() => resolveSearchProvider("unknown", false),
+		/Expected auto, duckduckgo, volcengine, searxng, brave, tavily, exa, serper/,
+	);
 });
 
 test("runSearch routes to DuckDuckGo and preserves count and cancellation", async () => {
@@ -57,6 +61,53 @@ test("explicit existing provider mode reports missing credentials before calling
 		}),
 		/Web search credentials missing/,
 	);
+});
+
+test("new paid provider credentials do not change auto routing", async () => {
+	let called = "";
+	const result = await runSearch("news", 3, "auto", undefined, undefined, {
+		async duckduckgo() {
+			called = "duckduckgo";
+			return sample;
+		},
+		async volcengine() {
+			throw new Error("wrong adapter");
+		},
+	}, { BRAVE_SEARCH_API_KEY: "brave", TAVILY_API_KEY: "tavily", SERPER_API_KEY: "serper" });
+	assert.equal(result.provider, "duckduckgo");
+	assert.equal(called, "duckduckgo");
+});
+
+test("new providers require their explicit configuration before adapter execution", async () => {
+	for (const [provider, variable] of [
+		["searxng", "SEARXNG_BASE_URL"],
+		["brave", "BRAVE_SEARCH_API_KEY"],
+		["tavily", "TAVILY_API_KEY"],
+		["serper", "SERPER_API_KEY"],
+	] as const) {
+		await assert.rejects(
+			runSearch("news", 3, provider, undefined, undefined, {
+				async duckduckgo() { return sample; },
+				async volcengine() { return sample; },
+			}, {}),
+			new RegExp(variable),
+		);
+	}
+});
+
+test("explicit Exa selects MCP without a key and REST with a key", async () => {
+	const transports: Array<string | undefined> = [];
+	const adapters = {
+		async duckduckgo() { return sample; },
+		async volcengine() { return sample; },
+		async exa(_query: string, _count: number, apiKey?: string) {
+			transports.push(apiKey);
+			return { transport: apiKey ? "rest" as const : "mcp" as const, results: sample };
+		},
+	};
+	assert.equal((await runSearch("news", 3, "exa", undefined, undefined, adapters, {})).transport, "mcp");
+	assert.equal((await runSearch("news", 3, "exa", undefined, undefined, adapters, { EXA_API_KEY: "exa-key" })).transport, "rest");
+	assert.deepEqual(transports, [undefined, "exa-key"]);
 });
 
 test("runSearch keeps credentialed auto mode on the existing provider", async () => {
