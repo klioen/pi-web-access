@@ -34,6 +34,15 @@ const BLOCKED_HOSTS = new Set([
 
 type FetchFormat = "text" | "markdown" | "html";
 
+interface WebFetchDetails {
+	url?: string;
+	mime?: string;
+	contentType?: string;
+	format?: FetchFormat;
+	bytes?: number;
+	error?: string;
+}
+
 function isBlockedIPv4(ip: string): boolean {
 	const parts = ip.split(".").map(Number);
 	if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return true;
@@ -277,8 +286,20 @@ function normalizeTimeout(timeout: number | undefined): number {
 	return Math.min(Math.max(Math.floor(timeout), 1), MAX_TIMEOUT_SECONDS);
 }
 
+const parameters = Type.Object({
+	url: Type.String({ description: "The URL to fetch. Must start with http:// or https://." }),
+	format: Type.Optional(
+		Type.Union([Type.Literal("text"), Type.Literal("markdown"), Type.Literal("html")], {
+			description: "Return format: markdown (default), text, or html.",
+		}),
+	),
+	timeout: Type.Optional(
+		Type.Integer({ minimum: 1, maximum: 120, description: "Timeout in seconds (default 30, max 120)." }),
+	),
+});
+
 export default function (pi: ExtensionAPI) {
-	pi.registerTool({
+	pi.registerTool<typeof parameters, WebFetchDetails>({
 		name: "web_fetch",
 		label: "Web Fetch",
 		description:
@@ -286,17 +307,7 @@ export default function (pi: ExtensionAPI) {
 			"Image responses are returned as image attachments. Only public http(s) URLs; " +
 			"internal and private addresses are blocked.",
 		promptSnippet: "Use to read a specific web page, document, or file by URL.",
-		parameters: Type.Object({
-			url: Type.String({ description: "The URL to fetch. Must start with http:// or https://." }),
-			format: Type.Optional(
-				Type.Union([Type.Literal("text"), Type.Literal("markdown"), Type.Literal("html")], {
-					description: "Return format: markdown (default), text, or html.",
-				}),
-			),
-			timeout: Type.Optional(
-				Type.Integer({ minimum: 1, maximum: 120, description: "Timeout in seconds (default 30, max 120)." }),
-			),
-		}),
+		parameters,
 		async execute(_callId, params, signal) {
 			const format: FetchFormat = params.format ?? "markdown";
 			const timeoutSeconds = normalizeTimeout(params.timeout);
